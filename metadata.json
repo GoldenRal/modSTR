@@ -1,0 +1,5 @@
+{
+  "name": "Search Title Analyzer",
+  "description": "An application to analyze property title documents using Google AI, generating professional Search Title Reports for legal and banking due diligence.",
+  "requestFramePermissions": []
+}
