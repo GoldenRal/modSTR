@@ -1,5 +1,5 @@
 import { GoogleGenAI, Part, Type } from "@google/genai";
-import { Project, User, Scenario, ProjectDetails, Report, LitigationCheckResult } from '../types';
+import { Project, User, Scenario, ProjectDetails, Report } from '../types';
 import { SCENARIOS, SCENARIO_BASED_DOCUMENTS, REPORT_FORMATS } from '../constants';
 import { supabase } from '../supabaseClient';
 
@@ -516,122 +516,74 @@ export const analyzeDocumentCompleteness = async (userId: string | null, uploade
   return result;
 };
 
-export const performLitigationCheck = async (userId: string | null, aggregatedDocumentText: string, estimatedInputTokens: number = 0, estimatedOutputTokens: number = 0, apiEndpointType: string = 'performLitigationCheck'): Promise<LitigationCheckResult | typeof RATE_LIMIT_EXCEEDED> => {
-  let result: LitigationCheckResult | typeof RATE_LIMIT_EXCEEDED;
-  let success: boolean = false;
-  let errorMessage: string | undefined;
-  let actualPromptTokens: number = 0;
-  let actualCompletionTokens: number = 0;
-
-  if (!aggregatedDocumentText || aggregatedDocumentText.trim().length === 0) {
-    result = { litigation_risk: 'Unknown', details: ['No documents provided for analysis.'], confidence: 0 };
-    success = true;
-    await logAiCall(userId, 'N/A', apiEndpointType, estimatedInputTokens, estimatedOutputTokens, success, errorMessage);
-    return result;
-  }
-
-  try {
-    const prompt = `
-    You are an expert legal AI assistant. Your task is to analyze the provided legal document text (which may contain multiple documents separated by "--- Document: [filename] ---") for potential litigation risks, anomalies, or "something fishy" that suggests a legal dispute or issue, even if it's not a formal court case.
-
-    Look for specific clues such as:
-    -   **Explicit Litigation References**: Court case numbers, Lis pendens references, Notices of acquisition, Police complaints, Arbitration notices.
-    -   **Inconsistencies/Discrepancies**: Significant variations in property descriptions, boundaries, owner names, or dates.
-    -   **Unusual Clauses or Conditions**: Non-standard, ambiguous, or overly complex clauses.
-    -   **Gaps in Title Chain**: Unexplained breaks in ownership or rapid transfers.
-    -   **Mentions of Disputes/Claims/Objections**: Phrases indicating disagreements, challenges, or third-party claims.
-    -   **Unclear Encumbrances**: Vague or uncleared charges, liens, mortgages.
-    -   **Revenue Record Anomalies**: Unusual entries in 7/12 extracts or Property Cards.
-    -   **Missing Mandatory Documents/Registrations**: Referenced documents not provided.
-    -   **Power of Attorney Issues**: Suspicious use of POA.
-    -   **Under-valuation**: Sale consideration significantly lower than market value.
-
-    DOCUMENT TEXT:
-    ---
-    ${aggregatedDocumentText.substring(0, 30000)}
-    ---
-
-    Provide your output as a JSON object with the following structure:
-    {
-      "litigation_risk": "Yes" | "No" | "Unknown",
-      "details": string[],
-      "confidence": number
-    }
-    `;
-    actualPromptTokens = estimateTokens(prompt);
-
-    // Using gemini-2.5-pro for Litigation Detection to save cost over 3.0-pro-preview
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro',
-      contents: [{ text: prompt }],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            litigation_risk: {
-              type: Type.STRING,
-              enum: ['Yes', 'No', 'Unknown'],
-              description: "Indicates if litigation risk is detected."
-            },
-            details: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Specific findings or references for litigation. IN ENGLISH."
-            },
-            confidence: {
-              type: Type.NUMBER,
-              description: "Confidence level (0-100) in the assessment."
-            }
-          },
-          required: ['litigation_risk', 'details', 'confidence']
-        }
-      },
-    });
-
-    const jsonText = response.text?.trim();
-    actualCompletionTokens = estimateTokens(jsonText);
-    if (!jsonText) {
-      console.error("Gemini returned an empty response for litigation check.");
-      result = { litigation_risk: 'Unknown', details: ['AI returned no response.'], confidence: 0 };
-      errorMessage = "Empty response from AI.";
-    } else {
-      try {
-        const parsedResult = JSON.parse(jsonText);
-        if (parsedResult && typeof parsedResult.litigation_risk === 'string' && Array.isArray(parsedResult.details) && typeof parsedResult.confidence === 'number') {
-          result = parsedResult;
-          success = true;
-        } else {
-          result = { litigation_risk: 'Unknown', details: ['AI response has unexpected structure.'], confidence: 0 };
-          errorMessage = "AI response has unexpected structure.";
-        }
-      } catch (parseError: any) {
-        console.error("Failed to parse JSON for litigation check:", parseError, "Raw AI response:", jsonText);
-        result = { litigation_risk: 'Unknown', details: ['Failed to parse AI response.'], confidence: 0 };
-        errorMessage = `Failed to parse AI response: ${parseError.message}`;
-      }
-    }
-  } catch (error: any) {
-    const errMessage = error.toString();
-    if (errMessage.includes('429') || errMessage.includes('RESOURCE_EXCEEDED')) {
-      console.warn("Gemini API rate limit exceeded during litigation check. The operation will be retried automatically.");
-      result = RATE_LIMIT_EXCEEDED;
-      errorMessage = 'Rate limit exceeded';
-    } else {
-      console.error("Error performing litigation check with Gemini:", error);
-      result = { litigation_risk: 'Unknown', details: ['Failed to perform litigation check due to API error.'], confidence: 0 };
-      errorMessage = errMessage;
-    }
-  } finally {
-    await logAiCall(userId, 'gemini-2.5-pro', apiEndpointType, actualPromptTokens || estimatedInputTokens, actualCompletionTokens || estimatedOutputTokens, success, errorMessage);
-  }
-  return result;
-};
-
 const generateRAGPrompt = (project: Project, retrievedContext: string, user: User, reportFormat: string = REPORT_FORMATS[0], advocateInstructions?: string): string => {
   const today = new Date();
   const formattedDate = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
   
+  const governingRules = `
+STRICT GOVERNING RULES (MANDATORY):
+
+1. DOCUMENT HIERARCHY
+   Follow this document priority order strictly:
+   a) Loan Application / Title Search Request / Lender Instruction (highest authority)
+   b) Sale Deed / Conveyance Deed / Transfer Deeds
+   c) Revenue & Municipal Records
+   d) Encumbrance / Court / CERSAI Records
+   e) Identity Documents (lowest authority)
+
+   If any conflict exists between documents, follow the higher-priority document.
+   Never resolve conflicts silently. Always record them explicitly.
+
+2. APPLICANT IDENTIFICATION
+   Applicant name(s) must be taken ONLY from the Loan Application / Search Request.
+   Other documents may be used only to check consistency.
+   Do not add, remove, substitute, or correct applicant names.
+
+3. TARGET PROPERTY CONTROL
+   The target property description must be reproduced exactly as stated in the Loan Application.
+   Other documents may be used only to trace title for the same property.
+   If property details differ across documents, record the discrepancy clearly.
+
+4. STR TYPE DETERMINATION
+   Determine the type of STR (Purchase / Mortgage / LAP / Balance Transfer / Builder Loan) ONLY from the Loan Application.
+   Do not infer STR type from deeds, encumbrances, or transaction history.
+   If not explicitly stated, record that the STR type is not specified.
+
+5. SEARCH PERIOD
+   Use the search period strictly as stated in the Loan Application or lender instruction.
+   Do not assume a default period.
+   If not mentioned, explicitly state that the search period is not specified.
+
+6. CHAIN OF TITLE
+   Construct the chain of title strictly from the documents provided.
+   Do not assume missing links or ownership transitions.
+   Any missing or unclear link must be recorded as a gap in title.
+
+7. ENCUMBRANCES
+   List encumbrances exactly as found in records.
+   Do not infer discharge, validity, or closure unless explicitly documented.
+
+8. LEGAL OPINION SAFETY
+   Do not issue definitive or unconditional legal conclusions if:
+   - Documents are missing
+   - Discrepancies exist
+   - Search scope is unclear
+   Use conservative, bank-acceptable, conditional language.
+
+9. OUTPUT DISCIPLINE
+   Follow the existing STR format used by the system.
+   Improve clarity, consistency, and legal precision without changing section order or structure.
+
+10. PROHIBITED BEHAVIOR
+    - No assumptions
+    - No inferred facts
+    - No silent corrections
+    - No optimistic interpretations
+
+CORE OBJECTIVE:
+Improve accuracy, consistency, and legal defensibility of the STR while preserving the current generation process.
+`;
+
   const baseInstruction = `
 IMPORTANT FORMATTING AND LANGUAGE RULES: 
 1. **LANGUAGE**: The final report MUST be in ENGLISH. 
@@ -1015,9 +967,12 @@ IMPORTANT FORMATTING AND LANGUAGE RULES:
 SYSTEM INSTRUCTION:
 You are an expert legal AI assistant. Your task is to generate a professional Title Search Report based on the provided document context, STRICTLY following the requested format structure.
 
-**PROJECT DETAILS:**
-- **Client**: ${project.clientName || 'N/A'}
-- **Property**: ${project.propertyAddress || 'N/A'}
+${governingRules}
+
+**LOAN APPLICATION / SEARCH REQUEST DETAILS (HIGHEST AUTHORITY):**
+- **Client/Applicant Name**: ${project.clientName || 'N/A'}
+- **Target Property Description**: ${project.propertyAddress || 'N/A'}
+- **Search Period**: ${project.searchPeriod || 'Not Specified'}
 - **Date**: ${formattedDate}
 - **Advocate Instructions**: ${advocateInstructions || 'None'}
 
@@ -1126,7 +1081,6 @@ export const reformatReport = async (userId: string | null, inputReportContent: 
     const dummyProject: Project = {
       id: 'dummy', projectName: '', propertyAddress: '', clientName: '', searchPeriod: '',
       createdAt: new Date().toISOString(), documents: [], report: null, scenario: 'UNKNOWN',
-      litigationCheckResult: { litigation_risk: 'Unknown', details: [''], confidence: 0 },
       missingDocuments: [],
       advocateInstructions: advocateInstructions || '',
     };

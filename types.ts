@@ -33,12 +33,6 @@ export interface Document {
   error?: string;
 }
 
-export interface LitigationCheckResult {
-  litigation_risk: 'Yes' | 'No' | 'Unknown';
-  details: string[]; // List of specific findings
-  confidence: number; // 0-100
-}
-
 export interface Report {
   id: string;
   projectId: string;
@@ -85,7 +79,6 @@ export interface Project {
   report: Report | null;
   scenario?: Scenario;
   missingDocuments?: string[]; // To track required but missing document types
-  litigationCheckResult?: LitigationCheckResult; // Added for litigation check module
   advocateInstructions?: string; // Added to store advocate-specific instructions
 }
 

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import mammoth from 'mammoth'; // Import mammoth.js
 import { jsPDF } from 'jspdf'; // Import jsPDF
 import 'jspdf-autotable'; // Import jspdf-autotable plugin
-import { Project, Document, Report, User, LitigationCheckResult } from '../types';
+import { Project, Document, Report, User } from '../types';
 import { generateReport, extractTextFromFile, UNSUPPORTED_FOR_EXTRACTION, RATE_LIMIT_EXCEEDED } from '../services/geminiService'; 
 import { SCENARIOS, SCENARIO_BASED_DOCUMENTS, REPORT_FORMATS } from '../constants'; // Import REPORT_FORMATS
 import Card from './ui/Card';
@@ -18,15 +18,16 @@ interface ProjectViewProps {
   onDeleteDocument: (projectId: string, documentId: string) => void;
   onUpdateDocumentType: (projectId: string, documentId: string, newType: string) => void;
   onBack: () => void;
-  onTriggerLitigationCheck: (projectId: string) => void; // New prop for manual trigger
-  isLitigationChecking: boolean; // New prop to indicate if a check is in progress for this project
   // Add new props for project detail extraction
   onTriggerProjectDetailExtraction: (projectId: string) => void;
   isExtractingProjectDetails: boolean;
   checkApiAllowance: (apiType: string, value?: number) => Promise<boolean>; // New prop for API allowance check, now returns Promise<boolean>
 }
 
-const ReportSummaryCard: React.FC<{ report: Report }> = ({ report }) => {
+// Updated props to include project details for the PDF header
+const ReportSummaryCard: React.FC<{ report: Report; projectName: string; propertyAddress: string; clientName: string }> = ({ report, projectName, propertyAddress, clientName }) => {
+    const [isDownloading, setIsDownloading] = useState(false);
+
     // A simplified markdown renderer for the summary
     const renderSummary = (text: string = "") => {
         return text
@@ -38,56 +39,198 @@ const ReportSummaryCard: React.FC<{ report: Report }> = ({ report }) => {
                 if (line.trim() === '') {
                     return null;
                 }
-                return <p key={index} className="text-sm text-gray-700 leading-relaxed">{line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}</p>;
+                return <p key={index} className="text-sm text-gray-700 leading-relaxed mb-2">{line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}</p>;
             })
             .filter(Boolean);
     };
 
-    return (
-        <Card>
-            <h3 className="text-xl font-bold text-brand-dark mb-4">AI Analysis & Summary</h3>
+    const handleDownloadSummaryPdf = () => {
+        setIsDownloading(true);
+        try {
+            const doc = new jsPDF();
+            const pageWidth = doc.internal.pageSize.getWidth();
+            const margin = 15;
+            let y = 20;
 
-            {report.strCategory && (
-                <div className="mb-4">
-                    <span className="text-sm font-semibold text-gray-500 uppercase">STR Category</span>
-                    <p className="font-bold text-brand-primary text-lg">{report.strCategory}</p>
-                </div>
-            )}
+            // Header
+            doc.setFontSize(18);
+            doc.setTextColor(26, 35, 126); // Brand Primary
+            doc.text("Executive Legal Summary", pageWidth / 2, y, { align: "center" });
+            y += 10;
+
+            // Project Info Box
+            doc.setDrawColor(200, 200, 200);
+            doc.setFillColor(245, 247, 250);
+            doc.rect(margin, y, pageWidth - (margin * 2), 35, 'FD');
             
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {report.summary && (
-                    <div>
-                        <h4 className="text-lg font-semibold text-brand-dark mb-2 border-b pb-1">Title Summary</h4>
-                        <div className="prose prose-sm max-w-none">
-                            {renderSummary(report.summary)}
+            doc.setFontSize(10);
+            doc.setTextColor(80, 80, 80);
+            doc.text(`Project: ${projectName}`, margin + 5, y + 8);
+            doc.text(`Client: ${clientName}`, margin + 5, y + 16);
+            
+            const splitAddress = doc.splitTextToSize(`Address: ${propertyAddress}`, pageWidth - (margin * 2) - 10);
+            doc.text(splitAddress, margin + 5, y + 24);
+            
+            y += 45;
+
+            // Vital Stats (Category & Risk)
+            doc.setFontSize(12);
+            doc.setTextColor(0, 0, 0);
+            doc.setFont("helvetica", "bold");
+            doc.text("Vital Statistics", margin, y);
+            y += 8;
+
+            const categoryColor = report.strCategory?.includes("Clear") ? [0, 128, 0] : [200, 0, 0];
+            doc.setTextColor(categoryColor[0], categoryColor[1], categoryColor[2]);
+            doc.text(`Title Category: ${report.strCategory || 'N/A'}`, margin, y);
+            y += 8;
+
+            doc.setTextColor(0, 0, 0);
+            doc.text(`Risk Factors Detected: ${report.riskFlags?.length || 0}`, margin, y);
+            y += 15;
+
+            // Summary Content
+            doc.setFontSize(12);
+            doc.text("Executive Analysis", margin, y);
+            doc.setLineWidth(0.5);
+            doc.line(margin, y + 2, pageWidth - margin, y + 2);
+            y += 10;
+
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(10);
+            const summaryText = report.summary?.replace(/\*\*/g, '') || "No summary generated.";
+            const splitSummary = doc.splitTextToSize(summaryText, pageWidth - (margin * 2));
+            doc.text(splitSummary, margin, y);
+            
+            y += splitSummary.length * 5 + 10;
+
+            // Risk Flags Section
+            if (report.riskFlags && report.riskFlags.length > 0) {
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(12);
+                doc.setTextColor(185, 28, 28); // Red
+                doc.text("Compliance Red Flags", margin, y);
+                doc.setLineWidth(0.5);
+                doc.setDrawColor(185, 28, 28);
+                doc.line(margin, y + 2, pageWidth - margin, y + 2);
+                y += 10;
+
+                doc.setFont("helvetica", "normal");
+                doc.setFontSize(10);
+                doc.setTextColor(0, 0, 0);
+                
+                report.riskFlags.forEach(flag => {
+                    const flagText = `• ${flag}`;
+                    const splitFlag = doc.splitTextToSize(flagText, pageWidth - (margin * 2));
+                    // Check page break
+                    if (y + (splitFlag.length * 5) > doc.internal.pageSize.getHeight() - margin) {
+                        doc.addPage();
+                        y = 20;
+                    }
+                    doc.text(splitFlag, margin, y);
+                    y += splitFlag.length * 5 + 2;
+                });
+            }
+
+            // Footer
+            const pageHeight = doc.internal.pageSize.getHeight();
+            doc.setFontSize(8);
+            doc.setTextColor(150, 150, 150);
+            doc.text(`Generated by LegalAI Title Analyzer on ${new Date().toLocaleDateString()}`, margin, pageHeight - 10);
+
+            doc.save(`${projectName.replace(/\s+/g, '_')}_Executive_Summary.pdf`);
+
+        } catch (e) {
+            console.error("Error generating summary PDF", e);
+        } finally {
+            setIsDownloading(false);
+        }
+    };
+
+    return (
+        <Card className="border-t-4 border-brand-secondary">
+            <div className="flex justify-between items-start mb-6">
+                <div>
+                    <h3 className="text-2xl font-bold text-brand-dark">Executive Analysis & Summary</h3>
+                    <p className="text-xs text-gray-500 mt-1">Generated on {new Date(report.generatedAt).toLocaleDateString()} at {new Date(report.generatedAt).toLocaleTimeString()}</p>
+                </div>
+                <button 
+                    onClick={handleDownloadSummaryPdf}
+                    disabled={isDownloading}
+                    className="flex items-center space-x-2 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded transition-colors"
+                >
+                    {isDownloading ? <Spinner size="sm" /> : (
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                    )}
+                    <span>Download PDF</span>
+                </button>
+            </div>
+
+            <div className="flex flex-col lg:flex-row gap-8">
+                {/* Left Column: Vital Stats & Risks */}
+                <div className="w-full lg:w-1/3 space-y-6">
+                    {/* Vital Stats Box */}
+                    <div className="bg-brand-light/30 p-4 rounded-lg border border-brand-primary/10">
+                        <h4 className="text-sm font-bold text-gray-500 uppercase tracking-wide mb-3">Project Vitals</h4>
+                        
+                        <div className="mb-4">
+                            <span className="text-xs text-gray-500 block">Overall Title Status</span>
+                            <div className={`text-lg font-bold ${report.strCategory?.includes('Clear') ? 'text-green-700' : 'text-amber-600'}`}>
+                                {report.strCategory || 'Analysis Pending'}
+                            </div>
+                        </div>
+
+                        <div className="mb-2">
+                            <span className="text-xs text-gray-500 block">Risk Factor Count</span>
+                            <div className={`text-2xl font-extrabold ${report.riskFlags && report.riskFlags.length > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                {report.riskFlags ? report.riskFlags.length : 0}
+                            </div>
                         </div>
                     </div>
-                )}
-                
-                {report.riskFlags && (
+
+                    {/* Risk Flags List */}
                     <div>
-                         <h4 className="text-lg font-semibold text-brand-dark mb-2 border-b pb-1">Compliance Red Flags</h4>
-                         {report.riskFlags.length === 0 ? (
-                            <div className="flex items-center text-green-600 bg-green-50 p-3 rounded-md">
+                         <h4 className="text-lg font-bold text-gray-800 mb-3 flex items-center">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-600 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M8.257 3.099c.636-1.21 2.27-1.21 2.906 0l4.257 8.122c.624 1.192-.26 2.653-1.583 2.653H5.583c-1.323 0-2.207-1.461-1.583-2.653l4.257-8.122zM10 12a1 1 0 110-2 1 1 0 010 2zm-1-4a1 1 0 011-1h.01a1 1 0 110 2H10a1 1 0 01-1-1z" clipRule="evenodd" />
+                            </svg>
+                            Key Risk Indicators
+                         </h4>
+                         {(!report.riskFlags || report.riskFlags.length === 0) ? (
+                            <div className="flex items-center text-green-700 bg-green-50 p-3 rounded-md border border-green-100">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
                                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                                 </svg>
-                                <span className="text-sm font-medium">No red flags detected.</span>
+                                <span className="text-sm font-medium">No critical red flags detected.</span>
                             </div>
                          ) : (
-                            <ul className="space-y-2">
+                            <ul className="space-y-2 bg-red-50 p-3 rounded-md border border-red-100">
                                 {report.riskFlags.map((flag, index) => (
-                                    <li key={index} className="flex items-start text-red-700">
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 mt-0.5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
-                                          <path fillRule="evenodd" d="M8.257 3.099c.636-1.21 2.27-1.21 2.906 0l4.257 8.122c.624 1.192-.26 2.653-1.583 2.653H5.583c-1.323 0-2.207-1.461-1.583-2.653l4.257-8.122zM10 12a1 1 0 110-2 1 1 0 010 2zm-1-4a1 1 0 011-1h.01a1 1 0 110 2H10a1 1 0 01-1-1z" clipRule="evenodd" />
-                                        </svg>
-                                        <span className="text-sm">{flag}</span>
+                                    <li key={index} className="flex items-start text-red-800">
+                                        <span className="mr-2 text-red-500">•</span>
+                                        <span className="text-sm font-medium leading-snug">{flag}</span>
                                     </li>
                                 ))}
                             </ul>
                          )}
                     </div>
-                )}
+                </div>
+
+                {/* Right Column: Narrative Summary */}
+                <div className="w-full lg:w-2/3">
+                    <h4 className="text-lg font-bold text-gray-800 mb-3 border-b pb-2">Executive Summary</h4>
+                    <div className="bg-gray-50 p-5 rounded-lg border border-gray-200 text-gray-800">
+                        {report.summary ? (
+                            <div className="prose prose-sm prose-blue max-w-none">
+                                {renderSummary(report.summary)}
+                            </div>
+                        ) : (
+                            <p className="text-gray-500 italic">No narrative summary generated for this report.</p>
+                        )}
+                    </div>
+                </div>
             </div>
         </Card>
     );
@@ -455,7 +598,7 @@ interface ToastState {
 }
 
 // Changed `ProjectView` from a default export to a named export.
-export const ProjectView: React.FC<ProjectViewProps> = ({ project, user, onUpdateProject, onUploadDocuments, onDeleteDocument, onUpdateDocumentType, onBack, onTriggerLitigationCheck, isLitigationChecking, onTriggerProjectDetailExtraction, isExtractingProjectDetails, checkApiAllowance }) => {
+export const ProjectView: React.FC<ProjectViewProps> = ({ project, user, onUpdateProject, onUploadDocuments, onDeleteDocument, onUpdateDocumentType, onBack, onTriggerProjectDetailExtraction, isExtractingProjectDetails, checkApiAllowance }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDownloadingReport, setIsDownloadingReport] = useState(false);
   const [isDownloadingPdfReport, setIsDownloadingPdfReport] = useState(false); // New state for PDF download
@@ -916,51 +1059,15 @@ export const ProjectView: React.FC<ProjectViewProps> = ({ project, user, onUpdat
         )}
       </Card>
       
-      {/* Litigation Check Card */}
-      <Card className="mb-6">
-        <h2 className="text-xl font-bold text-brand-dark mb-4">Litigation Check</h2>
-        {project.litigationCheckResult ? (
-          <div>
-            <p className="text-lg font-semibold mb-2">
-              Risk Level: <span className={
-                project.litigationCheckResult.litigation_risk === 'Yes' ? 'text-red-600' :
-                project.litigationCheckResult.litigation_risk === 'No' ? 'text-green-600' :
-                'text-yellow-600'
-              }>
-                {project.litigationCheckResult.litigation_risk}
-              </span> ({project.litigationCheckResult.confidence}% Confidence)
-            </p>
-            <ul className="list-disc list-inside text-gray-700 space-y-1">
-              {project.litigationCheckResult.details.map((detail, index) => (
-                <li key={index}>{detail}</li>
-              ))}
-            </ul>
-          </div>
-        ) : (
-          <p className="text-gray-600 mb-4">No litigation check has been performed for this project yet.</p>
-        )}
-        <button
-          onClick={() => onTriggerLitigationCheck(project.id)}
-          disabled={isLitigationChecking || project.documents.filter(d => d.status === 'Processed').length === 0}
-          className="mt-4 px-4 py-2 bg-brand-secondary text-white rounded-md hover:bg-brand-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-        >
-          {isLitigationChecking ? <Spinner size="sm" /> : (
-            <>
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-              </svg>
-              Run Litigation Check
-            </>
-          )}
-        </button>
-        {project.documents.filter(d => d.status === 'Processed').length === 0 && (
-          <p className="text-sm text-red-500 mt-2">Upload and process documents first to run a litigation check.</p>
-        )}
-      </Card>
-
-
       {/* Report Summary Card (conditional on project.report) */}
-      {project.report && <ReportSummaryCard report={project.report} />}
+      {project.report && (
+        <ReportSummaryCard 
+            report={project.report} 
+            projectName={project.projectName} 
+            propertyAddress={project.propertyAddress} 
+            clientName={project.clientName}
+        />
+      )}
 
 
       {/* Report Generation Controls */}

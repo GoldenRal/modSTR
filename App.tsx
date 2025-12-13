@@ -1,13 +1,13 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import LoginScreen from './components/LoginScreen';
 import Dashboard from './components/Dashboard';
 import SignUpScreen from './components/SignUpScreen'; // Import new SignUpScreen
 import { ProjectView } from './components/ProjectView';
 import Header from './components/ui/Header';
 import Toast from './components/ui/Toast';
-import { User, Project, Document, ProjectDetails, LitigationCheckResult, Scenario, Plan, ApiLimits } from './types'; // Removed BillingRecord import
+import { User, Project, Document, ProjectDetails, Scenario, Plan, ApiLimits } from './types'; // Removed BillingRecord import
 import { SCENARIO_BASED_DOCUMENTS, SCENARIOS } from './constants';
-import { classifyDocument, extractTextFromFile, UNSUPPORTED_FOR_EXTRACTION, RATE_LIMIT_EXCEEDED, extractProjectDetailsAndScenario, analyzeDocumentCompleteness, performLitigationCheck } from './services/geminiService';
+import { classifyDocument, extractTextFromFile, UNSUPPORTED_FOR_EXTRACTION, RATE_LIMIT_EXCEEDED, extractProjectDetailsAndScenario, analyzeDocumentCompleteness } from './services/geminiService';
 import { supabase } from './supabaseClient'; // Import supabase client
 import DocumentTextViewModal from './components/ui/DocumentTextViewModal'; // Corrected import path
 
@@ -45,6 +45,9 @@ const App: React.FC = () => {
   const [toast, setToast] = useState<{ show: boolean; message: string; type: 'info' | 'success' | 'error' }>({ 
     show: false, message: '', type: 'info' 
   });
+
+  // Track the last date we fetched limits to enable auto-refresh on day change
+  const lastFetchDateRef = useRef<string>(new Date().toISOString().split('T')[0]);
 
   const [projects, setProjects] = useState<Project[]>(() => {
     const savedData = localStorage.getItem(STORAGE_KEY);
@@ -114,7 +117,6 @@ const App: React.FC = () => {
                 searchPeriod: project.searchPeriod || 'Not Provided',
                 scenario: project.scenario && SCENARIOS[project.scenario] ? project.scenario : 'UNKNOWN' as Scenario, // Validate scenario
                 report: project.report || null,
-                litigationCheckResult: project.litigationCheckResult || undefined,
                 advocateInstructions: project.advocateInstructions || '', // Initialize with empty string if not present
             });
         } catch (e) {
@@ -137,12 +139,15 @@ const App: React.FC = () => {
   // Fix: Initialize useState correctly for Set<string>
   // State to track which projects are currently having details extracted to prevent race conditions
   const [isExtractingFor, setIsExtractingFor] = useState<Set<string>>(new Set());
-  // State to track which projects are currently having litigation checks performed
-  const [isLitigationCheckingFor, setIsLitigationCheckingFor] = useState<Set<string>>(new Set());
 
   // Function to fetch user's plan and API limits
   const fetchUserPlanAndLimits = useCallback(async (userId: string) => {
     try {
+      // Update the ref to current UTC date
+      const today = new Date();
+      const todayStr = today.toISOString().split('T')[0];
+      lastFetchDateRef.current = todayStr;
+
       // Fetch api_limits for the user
       const { data: apiLimitsData, error: apiLimitsError } = await supabase
         .from('api_limits')
@@ -174,7 +179,6 @@ const App: React.FC = () => {
         currentPlan = planData as Plan;
 
         // NEW LIMITS FEATURE: Client-side monthly usage reset logic
-        const today = new Date();
         const resetDate = new Date(currentApiLimits.reset_date);
         
         if (today.getMonth() !== resetDate.getMonth() || today.getFullYear() !== resetDate.getFullYear()) {
@@ -184,7 +188,7 @@ const App: React.FC = () => {
             input_tokens_used_monthly: 0,
             output_tokens_used_monthly: 0,
             strs_used_monthly: 0,
-            reset_date: today.toISOString().split('T')[0],
+            reset_date: todayStr,
           };
           // Attempt to update reset date in DB (requires 'update_own_api_limits_reset' RLS policy)
           const { error: updateResetError } = await supabase
@@ -206,7 +210,6 @@ const App: React.FC = () => {
         }
 
         // Fetch daily STR count for current day
-        const todayStr = today.toISOString().split('T')[0];
         const { data: dailyUsageData, error: dailyUsageError } = await supabase
             .from('daily_usage')
             .select('str_count')
@@ -246,7 +249,7 @@ const App: React.FC = () => {
             input_tokens_used_monthly: 0, // NEW
             output_tokens_used_monthly: 0, // NEW
             strs_used_monthly: 0, // NEW
-            reset_date: new Date().toISOString().split('T')[0], // Current date as reset date
+            reset_date: todayStr, // Current date as reset date
         };
 
         // Insert this default into api_limits table. Requires 'insert_own_api_limits' RLS policy.
@@ -294,6 +297,22 @@ const App: React.FC = () => {
       setToast({ show: true, message: `Failed to load plan: ${errorMsg || 'Unknown error. Please check console.'}`, type: 'error' });
     }
   }, []); // Empty dependency array for useCallback
+
+  // Effect to automatically refresh usage limits if the calendar day changes (UTC midnight)
+  useEffect(() => {
+    if (!user) return;
+    
+    // Check every minute if the date has changed
+    const intervalId = setInterval(() => {
+      const currentUtcDate = new Date().toISOString().split('T')[0];
+      if (currentUtcDate !== lastFetchDateRef.current) {
+        console.log("Day changed (UTC), refreshing user limits...");
+        fetchUserPlanAndLimits(user.id);
+      }
+    }, 60000); // 1 minute interval
+
+    return () => clearInterval(intervalId);
+  }, [user, fetchUserPlanAndLimits]);
 
   useEffect(() => {
     // Check for an existing session on app load
@@ -490,90 +509,6 @@ const App: React.FC = () => {
     }, 100); // A slight delay to allow state to settle
   };
 
-  const runLitigationCheck = useCallback(async (projectId: string) => {
-    if (isLitigationCheckingFor.has(projectId) || !user) { // Ensure user is logged in
-      console.log(`Litigation check already in progress or user not logged in for project ${projectId}. Skipping.`);
-      return;
-    }
-    
-    // NEW LIMITS FEATURE: Estimate tokens for litigation check. Higher for detailed text.
-    let projectToLitigationCheck: Project | undefined;
-    setProjects(currentProjects => {
-        projectToLitigationCheck = currentProjects.find(p => p.id === projectId);
-        return currentProjects;
-    });
-    const allText = projectToLitigationCheck?.documents
-          .filter(d => d.status === 'Processed' && d.extractedText)
-          .map(d => `--- Document: ${d.fileName} ---\n${d.extractedText}`)
-          .join('\n\n') || '';
-    const estimatedInputTokens = Math.ceil(allText.length / 4) || 2000; // Use actual text length or default
-    const estimatedOutputTokens = 500;
-
-    if (!(await checkApiAllowance('TOKENS_INPUT', estimatedInputTokens)) || !(await checkApiAllowance('TOKENS_OUTPUT', estimatedOutputTokens))) return; 
-
-    setIsLitigationCheckingFor(prev => new Set(prev).add(projectId));
-    const minDisplayTimeMs = 1500; // Minimum time spinner will be shown
-    const startTime = Date.now();
-
-    try {
-      if (!projectToLitigationCheck) {
-        console.warn(`Project ${projectId} not found for litigation check.`);
-        return;
-      }
-
-      if (!allText) {
-          setProjects(prev => prev.map(p =>
-            p.id === projectId ? { ...p, litigationCheckResult: { litigation_risk: 'Unknown', details: ['No processed document text available for litigation check. Please upload and process documents.'], confidence: 0 } } : p
-          ));
-          console.log(`No processed text for project ${projectId} for litigation check.`);
-          return;
-      }
-
-      console.log(`Initiating litigation check for project ${projectId}...`);
-      // Pass userId and estimated tokens to performLitigationCheck
-      const result = await performLitigationCheck(user.id, allText, estimatedInputTokens, estimatedOutputTokens, 'performLitigationCheck');
-      console.log(`Litigation check result for ${projectId}:`, result);
-
-
-      if (result === RATE_LIMIT_EXCEEDED) {
-          console.warn('Rate limit hit for litigation check, retrying in 20s');
-          setTimeout(() => runLitigationCheck(projectId), 20000);
-          return;
-      }
-
-      setProjects(prev => prev.map(p =>
-        p.id === projectId ? { ...p, litigationCheckResult: result as LitigationCheckResult } : p
-      ));
-
-      // After a successful operation that might affect usage, re-fetch limits
-      if (user) fetchUserPlanAndLimits(user.id);
-    } catch (error) {
-      console.error(`Error during litigation check for project ${projectId}:`, error);
-      setProjects(prev => prev.map(p =>
-        p.id === projectId ? { ...p, litigationCheckResult: { litigation_risk: 'Unknown', details: [`Error during check: ${error instanceof Error ? error.message : String(error)}`], confidence: 0 } } : p
-      ));
-    } finally {
-      const elapsedTime = Date.now() - startTime;
-      const remainingTime = minDisplayTimeMs - elapsedTime;
-
-      if (remainingTime > 0) {
-        setTimeout(() => {
-          setIsLitigationCheckingFor(prev => {
-              const newSet = new Set(prev);
-              newSet.delete(projectId);
-              return newSet;
-          });
-        }, remainingTime);
-      } else {
-        setIsLitigationCheckingFor(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(projectId);
-            return newSet;
-        });
-      }
-    }
-  }, [isLitigationCheckingFor, projects, user, checkApiAllowance, fetchUserPlanAndLimits]);
-
 
   // New function to handle the entire logic for extracting and updating project details
   const runProjectDetailExtraction = useCallback(async (projectId: string) => {
@@ -607,7 +542,6 @@ const App: React.FC = () => {
       if (!allText) {
           // If no text, still run downstream checks in case some docs were removed and state needs refresh
           handleCheckCompleteness(projectId);
-          runLitigationCheck(projectId);
           return; // No text to analyze for details, exit early.
       }
 
@@ -645,12 +579,11 @@ const App: React.FC = () => {
           return p;
       }));
       
-      // 7. ALWAYS Re-run completeness and litigation checks if AI extraction was performed
+      // 7. ALWAYS Re-run completeness checks if AI extraction was performed
       // This ensures they run with the most up-to-date and aggregated document context.
       // Only trigger if the project details actually changed, to avoid redundant checks.
       if (projectWasUpdated) {
           handleCheckCompleteness(projectId);
-          runLitigationCheck(projectId);
       }
 
       // After a successful operation that might affect usage, re-fetch limits
@@ -665,7 +598,7 @@ const App: React.FC = () => {
             return newSet;
         });
     }
-  }, [isExtractingFor, projects, handleCheckCompleteness, runLitigationCheck, user, checkApiAllowance, fetchUserPlanAndLimits]);
+  }, [isExtractingFor, projects, handleCheckCompleteness, user, checkApiAllowance, fetchUserPlanAndLimits]);
 
 
   // This function processes a single document from the queue.
@@ -1004,7 +937,6 @@ const App: React.FC = () => {
       report: null,
       createdAt: new Date().toISOString(),
       scenario: 'UNKNOWN',
-      litigationCheckResult: undefined, // Initialize litigation check result
       advocateInstructions: '', // Initialize advocateInstructions as empty string
     };
     
@@ -1176,8 +1108,6 @@ const App: React.FC = () => {
             onDeleteDocument={handleDeleteDocument}
             onUpdateDocumentType={handleUpdateDocumentType}
             onBack={handleBackToDashboard}
-            onTriggerLitigationCheck={runLitigationCheck}
-            isLitigationChecking={isLitigationCheckingFor.has(selectedProject.id)}
             onTriggerProjectDetailExtraction={runProjectDetailExtraction}
             isExtractingProjectDetails={isExtractingFor.has(selectedProject.id)}
             checkApiAllowance={checkApiAllowance} // Pass checkApiAllowance
@@ -1190,6 +1120,7 @@ const App: React.FC = () => {
             onDeleteProject={handleDeleteProject}
             userPlan={userPlan} // NEW LIMITS FEATURE: Pass plan to Dashboard
             userApiLimits={userApiLimits} // NEW LIMITS FEATURE: Pass API limits to Dashboard
+            dailyUsage={user.dailyStrsUsed} // NEW: Pass daily usage to Dashboard
           />
         )}
       </main>

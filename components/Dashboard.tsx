@@ -10,6 +10,7 @@ interface DashboardProps {
   onDeleteProject: (projectId: string) => void;
   userPlan?: Plan | null; // Added new prop for user plan
   userApiLimits?: ApiLimits | null; // Added new prop for user API limits
+  dailyUsage?: number; // Added new prop for daily usage count
 }
 
 const NewProjectModal: React.FC<{ isOpen: boolean; onClose: () => void; onCreate: (data: Omit<Project, 'id' | 'documents' | 'report' | 'createdAt' | 'advocateInstructions'>, files?: File[]) => void; }> = ({ isOpen, onClose, onCreate }) => {
@@ -142,7 +143,7 @@ const DeleteConfirmationModal: React.FC<{
   );
 };
 
-const Dashboard: React.FC<DashboardProps> = ({ projects, onSelectProject, onCreateProject, onDeleteProject, userPlan, userApiLimits }) => {
+const Dashboard: React.FC<DashboardProps> = ({ projects, onSelectProject, onCreateProject, onDeleteProject, userPlan, userApiLimits, dailyUsage }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
 
@@ -174,7 +175,7 @@ const Dashboard: React.FC<DashboardProps> = ({ projects, onSelectProject, onCrea
             </div>
             <div className="p-3 bg-white rounded-md shadow-sm border border-gray-200">
               <p className="font-medium text-gray-600">Daily STRs</p>
-              <p className="text-lg font-semibold text-brand-dark">{formatNumber(userApiLimits.strs_used_monthly)} / {formatNumber(userPlan.max_strs_per_day)}</p>
+              <p className="text-lg font-semibold text-brand-dark">{formatNumber(dailyUsage || 0)} / {formatNumber(userPlan.max_strs_per_day)}</p>
             </div>
             <div className="p-3 bg-white rounded-md shadow-sm border border-gray-200">
               <p className="font-medium text-gray-600">Input Tokens (Mo)</p>
