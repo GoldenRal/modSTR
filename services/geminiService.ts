@@ -3,7 +3,7 @@ import { Project, User, Scenario, ProjectDetails, Report } from '../types';
 import { SCENARIOS, SCENARIO_BASED_DOCUMENTS, REPORT_FORMATS } from '../constants';
 import { supabase } from '../supabaseClient';
 
-//const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 // Helper to convert a File object to a GoogleGenAI.Part
 const fileToGenerativePart = async (file: File): Promise<Part> => {
