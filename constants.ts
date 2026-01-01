@@ -1,4 +1,3 @@
-
 import { User, Project, Scenario } from './types';
 
 // MOCK_USER is removed as authentication is now handled by Supabase

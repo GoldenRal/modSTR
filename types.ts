@@ -5,18 +5,16 @@ export interface User {
   email: string;
   firmName: string; // From Supabase user_metadata or default
   planName?: string; // e.g., 'Basic', 'Professional', 'Unlimited'
-  // NEW LIMITS FEATURE: Monthly usage and limits
-  monthlyAllowance?: number; // Old: Max allowed STRs or API calls per month
-  strsUsedMonthly?: number; // New: Current used STR count for the month
-  maxStrsMonthly?: number; // New: Max allowed STRs per month
-  inputTokensUsedMonthly?: number; // New: Current input tokens used
-  maxInputTokensMonthly?: number; // New: Max input tokens per month
-  outputTokensUsedMonthly?: number; // New: Max output tokens used
-  maxOutputTokensMonthly?: number; // New: Max output tokens per month
-  maxFileSizeDocMB?: number; // New: Max file size per document
-  maxTotalUploadMB?: number; // New: Max total upload size per STR
-  dailyStrsUsed?: number; // NEW: Current daily STR count
-  maxStrsDaily?: number; // NEW: Max allowed STRs per day
+  strsUsedMonthly?: number; // Current used STR count for the month
+  maxStrsMonthly?: number; // Max allowed STRs per month
+  inputTokensUsedMonthly?: number; // Current input tokens used
+  maxInputTokensMonthly?: number; // Max input tokens per month
+  outputTokensUsedMonthly?: number; // Max output tokens used
+  maxOutputTokensMonthly?: number; // Max output tokens per month
+  maxFileSizeDocMB?: number; // Max file size per document
+  maxTotalUploadMB?: number; // Max total upload size per STR
+  dailyStrsUsed?: number; // Current daily STR count
+  maxStrsDaily?: number; // Max allowed STRs per day
 }
 
 export interface Document {
@@ -78,32 +76,28 @@ export interface Project {
   documents: Document[];
   report: Report | null;
   scenario?: Scenario;
-  missingDocuments?: string[]; // To track required but missing document types
   advocateInstructions?: string; // Added to store advocate-specific instructions
 }
 
-// NEW LIMITS FEATURE: Updated Plan interface to include granular limits
 export interface Plan {
   id: number;
   name: string;
-  monthly_limit: number; // Old: general monthly limit (e.g., for basic reports)
+  monthly_limit: number;
   price_monthly: number;
   max_input_tokens_per_month: number;
   max_output_tokens_per_month: number;
   max_strs_per_month: number;
-  max_strs_per_day: number; // Daily limit, stored in plan but checked against daily_usage
+  max_strs_per_day: number;
   max_file_size_mb_per_document: number;
   max_total_upload_mb_per_str: number;
 }
 
-// NEW LIMITS FEATURE: Updated ApiLimits interface to track granular usage
 export interface ApiLimits {
   user_id: string;
   plan_id: number;
-  monthly_limit: number; // This will be the effective general limit for the user based on their plan
-  used: number; // Old: Current general usage for the period
-  reset_date: string; // Date when the usage resets (for monthly limits)
-  // New granular usage counters
+  monthly_limit: number;
+  used: number;
+  reset_date: string;
   input_tokens_used_monthly: number;
   output_tokens_used_monthly: number;
   strs_used_monthly: number;
